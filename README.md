@@ -31,7 +31,7 @@ The **Attention Regression Deconvolution** model estimates ![X](https://latex.co
 
 where:
 
-- ![Y-XS](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}\|Y-XS\|_F^2): reconstruction loss  
+- ![Y-XS](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}\|Y-XS\|_F^2): **reconstruction loss**  
 - ![λr](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}\lambda_r\|X\|_F^2): **ridge penalty** for regularization  
 - ![L](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}\mathrm{Tr}(X^T L X)): **spatial smoothing term**, with ![L](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}L=D-W) being the graph Laplacian of adjacency matrix ![W](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}W).
 
@@ -45,8 +45,9 @@ Spatial weights are modulated by an attention mechanism:
   <img src="https://latex.codecogs.com/svg.image?\dpi{150}&space;\color{white}W_{ij}=\exp(-\alpha\,d_{ij}^2)\cdot\mathrm{Attn}(Y_i,Y_j)" />
 </p>
 
-where ![dij](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}d_{ij}) is the spatial distance and  
-![Attn](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}\mathrm{Attn}(Y_i,Y_j)) is a learnable similarity score between transcriptomic profiles.  
+Where:
+- ![dij](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}d_{ij}) is the spatial distance between spots.
+- ![Attn](https://latex.codecogs.com/svg.image?\dpi{120}&space;\color{white}\mathrm{Attn}(Y_i,Y_j)) is a learnable similarity score between the transcriptomic profiles of spots `i` and `j`.  
 This adaptively strengthens edges between **biologically similar** and **spatially close** spots.
 
 ---
