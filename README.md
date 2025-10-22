@@ -47,30 +47,14 @@ cd Spatial-Transcriptomics-Deconvolution
 ```
 
 🚀 Usage
-Data Preparation
-
-You will need to prepare the following data before running the model:
-
-Single-cell RNA-seq data (sc_data): A pandas DataFrame or a NumPy array containing gene expression data for each single cell.
-
-Spatial transcriptomics data (st_data): A pandas DataFrame or a NumPy array containing gene expression data for each spatial spot.
-
-Spatial coordinates (st_coordinates): A pandas DataFrame containing the x and y coordinates for each spatial spot in the transcriptomics data.
-
-Cell-type labels (celltype): A pandas Series or DataFrame containing the cell-type labels corresponding to the single-cell RNA-seq data.
-
-Running the Model
-
-Once your data is prepared, you can run the deconvolution model using the following Python code:
-
-from attention_regression_deconv import AttentionRegressionDeconv
 
 # Prepare your data: single-cell RNA-seq, spatial transcriptomics, and coordinates
-sc_data = # your single-cell RNA-seq data
-st_data = # your spatial transcriptomics data
-st_coordinates = # coordinates for spatial spots
-celltype = # your cell-type information (DataFrame or Series)
+sc_data = single-cell RNA-seq data
+st_data = spatial transcriptomics data
+st_coordinates = coordinates for spatial spots
+celltype = cell-types of single-cell RNA-seq data
 
+Once your data is prepared, run the deconvolution model using the following Python code:
 
 ```bash
 # Initialize the model
