@@ -71,6 +71,8 @@ st_data = # your spatial transcriptomics data
 st_coordinates = # coordinates for spatial spots
 celltype = # your cell-type information (DataFrame or Series)
 
+
+```bash
 # Initialize the model
 deconv = AttentionRegressionDeconv(
     sc_data=sc_data,
@@ -94,6 +96,6 @@ deconv_celltypes, elapsed_time = deconv.run()
 metrics = deconv.evaluate(deconv_celltypes, result_x)
 print(f"Elapsed time: {elapsed_time:.2f} sec")
 print("Evaluation metrics:", metrics)
-
+```
 
 
