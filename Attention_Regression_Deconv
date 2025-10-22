@@ -1,0 +1,353 @@
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import torch
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.stats import pearsonr, spearmanr
+from scipy.spatial.distance import cdist
+from scipy.linalg import eigh
+from joblib import Parallel, delayed
+import time
+from sklearn.neighbors import NearestNeighbors
+
+# GPU/CPU-agnostic linear algebra
+try:
+    import cupy as cp
+    xp = cp
+    gpu_available = True
+except ImportError:
+    xp = np
+    gpu_available = False
+
+
+class AttentionRegressionDeconv:
+    def __init__(self, sc_data, st_data, st_coordinates, celltype,
+                 phi=0.8, lambda_cell=1.0,
+                 lambda_spatial=1.0, lambda_ridge=1.0,
+                 max_cells_per_type=300, n_iter=5,
+                 n_jobs=-1, k_neighbors=6):
+        self.sc_data = sc_data
+        self.st_data = st_data
+        self.st_coordinates = st_coordinates
+        self.celltype = celltype
+        self.phi = phi                      # CAR-like spatial autocorrelation (initial)
+        self.lambda_cell = lambda_cell      # cell-level Laplacian weight
+        self.lambda_spatial = lambda_spatial# spatial penalty weight 
+        self.lambda_ridge = lambda_ridge
+        self.max_cells_per_type = max_cells_per_type
+        self.n_iter = n_iter
+        self.n_jobs = n_jobs
+        self.k_neighbors = k_neighbors
+
+        # Preprocessing builds: self.C, self.sc_df_nolabel, self.st_df, self.cell_types
+        self._preprocess()
+
+        # Build matrices: AAT etc.
+        self._build_matrices()
+
+        # Build spatial kNN & weights
+        self._build_knn_graph()
+
+        # Build type signatures matrix: shape (K, G)
+        self._build_type_signatures()
+
+    # -------------------------
+    # Attention Laplacian 
+    # -------------------------
+    def _build_attention_laplacian(self):
+        C_tensor = torch.tensor(self.C, dtype=torch.float32)
+        embed_dim = min(64, self.C.shape[1])
+        num_heads = min(4, max(1, embed_dim // 16 + 1))
+        mha = torch.nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
+        proj = torch.nn.Linear(self.C.shape[1], embed_dim, bias=False)
+        C_proj = proj(C_tensor).unsqueeze(0)
+        attn_output, attn_weights = mha(C_proj, C_proj, C_proj)
+        W_cell = attn_weights.squeeze(0).detach().cpu().numpy()
+        np.fill_diagonal(W_cell, 0)
+        D_cell = np.diag(W_cell.sum(axis=1))
+        L_cell = D_cell - W_cell
+        eigvals, eigvecs = eigh(L_cell)
+        eigvals = np.clip(eigvals, a_min=0, a_max=None)
+        L_cell_sqrt = eigvecs @ np.diag(np.sqrt(eigvals)) @ eigvecs.T
+        return np.sqrt(self.lambda_cell) * L_cell_sqrt
+
+    # -------------------------
+    # Preprocess: build AnnData, normalize, create C and S
+    # -------------------------
+    def _preprocess(self):
+        # single-cell
+        ad_sc = sc.AnnData(self.sc_data.copy())
+        sc.pp.normalize_total(ad_sc, target_sum=1e4)
+        sc.pp.log1p(ad_sc)
+        sc_df = ad_sc.to_df()
+
+        ct_series = self.celltype['celltype'] if isinstance(self.celltype, pd.DataFrame) else self.celltype
+        sc_df['celltype'] = ct_series.reindex(sc_df.index).astype(str).values
+
+        # spatial
+        ad_st = sc.AnnData(self.st_data.copy())
+        sc.pp.normalize_total(ad_st, target_sum=1e4)
+        sc.pp.log1p(ad_st)
+        st_df = ad_st.to_df()
+
+        # downsample per type to limit size
+        groups = []
+        for name, g in sc_df.groupby('celltype'):
+            n_keep = min(len(g), self.max_cells_per_type)
+            groups.append(g.sample(n_keep, random_state=0))
+        sc_df_sub = pd.concat(groups)
+
+        self.cell_types = sc_df_sub['celltype'].values
+        sc_df_nolabel = sc_df_sub.drop(columns=['celltype'])
+
+        common_genes = st_df.columns.intersection(sc_df_nolabel.columns)
+        if len(common_genes) == 0:
+            raise ValueError("No common genes between sc and st")
+
+        # keep consistent ordering: spatial's spot index order kept
+        self.st_df = st_df.loc[:, common_genes]
+        self.sc_df_nolabel = sc_df_nolabel.loc[:, common_genes]
+
+    # -------------------------
+    # Build raw matrices used in many solves
+    # -------------------------
+    def _build_matrices(self):
+        # C: cells x genes, S: spots x genes
+        self.C = self.sc_df_nolabel.values.astype(float)
+        self.C_T = self.C.T
+        self.S = self.st_df.values.astype(float)
+        self.num_spots, self.num_genes = self.S.shape
+        self.num_cells = self.C.shape[0]
+
+        # attention Laplacian for cell-level regularization (kept)
+        self.scaled_L_cell = self._build_attention_laplacian()
+
+        # precompute AAT = C @ C.T used in cell-level solves
+        self.AAT = self.C @ self.C.T
+
+    # -------------------------
+    # Build kNN graph and Gaussian weights (CARD-style row-normalized)
+    # -------------------------
+    def _build_knn_graph(self):
+        coords = self.st_coordinates.loc[self.st_df.index][['x', 'y']].astype(float).values
+        nbrs = NearestNeighbors(n_neighbors=self.k_neighbors, algorithm='auto').fit(coords)
+        distances, indices = nbrs.kneighbors(coords)
+
+        W = np.zeros((self.num_spots, self.num_spots))
+        for i in range(self.num_spots):
+            # adaptive sigma per spot (median of non-zero neighbor distances)
+            sigma_i = np.median(distances[i, 1:]) if self.k_neighbors > 1 else (distances[i, 0] + 1e-8)
+            sigma_i = max(sigma_i, 1e-8)
+            for j_idx, j in enumerate(indices[i]):
+                if i != j:
+                    d = distances[i, j_idx]
+                    W[i, j] = np.exp(-d**2 / (2.0 * sigma_i**2))
+
+        # Row-normalize exactly like CARD: \tilde{W}_{ij} = W_{ij} / sum_j W_{ij}
+        self.W_spot = W / (W.sum(axis=1, keepdims=True) + 1e-8)
+
+    # -------------------------
+    # Build per-type signatures B (K x G) as mean expression per cell type
+    # -------------------------
+    def _build_type_signatures(self):
+        df_cells = pd.DataFrame(self.C, index=pd.Index(range(self.num_cells)))
+        df_cells['celltype'] = self.cell_types
+        type_groups = df_cells.groupby('celltype')
+        B_rows = []
+        self.type_to_cell_indices = {}
+        self.unique_types = []
+        for k, (name, g) in enumerate(type_groups):
+            idx = g.index.values
+            self.type_to_cell_indices[name] = idx
+            self.unique_types.append(name)
+            # mean across cells of this type -> gene-level signature
+            mean_sig = g.drop(columns=['celltype']).values.mean(axis=0)
+            B_rows.append(mean_sig)
+        self.B = np.vstack(B_rows)  # shape (K, G)
+        self.K = self.B.shape[0]
+
+        # Precompute s_k = B_k dot B_k (scalar) and S@B_k (spots vector) will be used
+        self.B_norm_sq = np.sum(self.B * self.B, axis=1) + 1e-12  # length K
+
+    # -------------------------
+    # Vectorized spectral update for V (spots x K)
+    # -------------------------
+    def _update_V_card(self, initial_V=None):
+        # Initialize V (spots x K)
+        if initial_V is None:
+            # simple projection initialization
+            V = (self.S @ self.B.T) / (self.B_norm_sq[None, :])
+            V = np.clip(V, 0, None)
+            V = V / (V.sum(axis=1, keepdims=True) + 1e-8)
+        else:
+            V = initial_V.copy()
+
+        # Precompute M and MtM (spots x spots)
+        I_spots = np.eye(self.num_spots)
+        W = self.W_spot
+        M = I_spots - self.phi * W
+        MtM = M.T @ M  # symmetric
+
+        # Spectral decomposition of MtM (use xp when GPU available)
+        if gpu_available:
+            MtM_xp = xp.asarray(MtM)
+            eigvals, eigvecs = xp.linalg.eigh(MtM_xp)
+            eigvals = xp.asnumpy(eigvals)
+            eigvecs = xp.asnumpy(eigvecs)
+        else:
+            eigvals, eigvecs = eigh(MtM)
+
+        # Precompute SB = S @ B^T  (spots x K)
+        SB = self.S @ self.B.T  # numpy array
+
+        # Precompute MtM @ ones vector (spots,)
+        ones_spot = np.ones(self.num_spots)
+        m1 = MtM @ ones_spot  # (spots,)
+
+        # Iterative spectral updates
+        for it in range(self.n_iter):
+            # estimate b_k as current mean across spots
+            b_k_vec = V.mean(axis=0)  # (K,)
+
+            # Build RHS matrix R = SB + lambda_spatial * (m1[:,None] * b_k_vec[None,:])
+            R = SB + self.lambda_spatial * (m1[:, None] * b_k_vec[None, :])  # (spots x K)
+
+            # Transform to spectral domain: U^T R
+            U_T_R = eigvecs.T @ R  # (spots x K)
+
+            # Denominator matrix: for each eigen e and type k:
+            # denom[e, k] = (s_k + lambda_ridge) + lambda_spatial * eigvals[e]
+            # s_k = self.B_norm_sq[k]
+            s_k = self.B_norm_sq  # (K,)
+            denom = (s_k[None, :] + self.lambda_ridge) + (self.lambda_spatial * eigvals[:, None])  # (spots x K)
+
+            # Solve in spectral domain: V_hat = U^T_R / denom
+            V_hat = U_T_R / denom
+
+            # Transform back: V = U V_hat
+            V = eigvecs @ V_hat  # (spots x K)
+
+            # enforce non-negativity and renormalize per spot
+            V = np.clip(V, 0, None)
+            V = V / (V.sum(axis=1, keepdims=True) + 1e-8)
+
+        return V
+
+    # -------------------------
+    # Distribute type-level V (spots x K) to cell-level deconv_prop (spots x num_cells)
+    # -------------------------
+    def _distribute_V_to_cells(self, V):
+        deconv_prop = np.zeros((self.num_spots, self.num_cells), dtype=float)
+        # precompute per-cell score to each type: score_{cell,t} = C_cell · B_t
+        cell_type_scores = self.C @ self.B.T  # (cells x K)
+        # For each type, build per-cell weights among cells of that type
+        for t_idx, t_name in enumerate(self.unique_types):
+            cell_inds = self.type_to_cell_indices[t_name]
+            scores = cell_type_scores[cell_inds, t_idx]  # (n_cells_type,)
+            scores = np.clip(scores, 0, None) + 1e-8
+            norm_weights = scores / (scores.sum() + 1e-8)  # distribution among cells of this type
+            deconv_prop[:, cell_inds] = (V[:, t_idx][:, None] * norm_weights[None, :])
+
+        deconv_prop = deconv_prop / (deconv_prop.sum(axis=1, keepdims=True) + 1e-8)
+        return deconv_prop
+
+    # -------------------------
+    # Existing per-spot solve (kept as a refinement / fallback)
+    # -------------------------
+    def _solve_spot_local_regularized(self, i, deconv_prop, noise_level=0.01):
+        b_top = self.S[i]
+
+        # add noise to regression target
+        noise = np.random.normal(loc=0.0, scale=noise_level, size=b_top.shape)
+        rhs_data_term = self.C @ (b_top + noise)  # noise injected here
+
+        w_i = self.W_spot[i]
+        neighbor_indices = np.where(w_i > 0)[0]
+        if len(neighbor_indices) > 0:
+            neighbor_props_i = deconv_prop[neighbor_indices]
+            weights_i = w_i[neighbor_indices]
+            neighbor_avg = (weights_i[:, None] * neighbor_props_i).sum(axis=0) / (weights_i.sum() + 1e-8)
+            neighbor_contrib = self.scaled_L_cell @ neighbor_avg
+        else:
+            neighbor_contrib = np.zeros(self.num_cells)
+
+        rhs = rhs_data_term + self.lambda_spatial * neighbor_contrib
+        alpha = self.lambda_ridge + self.lambda_spatial * w_i.sum()
+        lhs = self.AAT + (alpha + 1e-8) * np.eye(self.num_cells)
+
+        if gpu_available:
+            lhs_xp = xp.asarray(lhs)
+            rhs_xp = xp.asarray(rhs)
+            p_xp = xp.linalg.solve(lhs_xp, rhs_xp)
+            p = xp.asnumpy(p_xp)
+        else:
+            p = np.linalg.solve(lhs, rhs)
+
+        p = np.clip(p, 0, None)
+        p = p / (p.sum() + 1e-8)
+        return p
+
+
+    # -------------------------
+    # first CARD-like type-level solution, map to cells, then optionally refine with Gauss-Seidel cell-level smoothing
+    # -------------------------
+    def run(self, refine_with_cell_level=True):
+        start = time.time()
+
+        # 1) CARD-inspired: estimate V (spots x K) with CAR-like penalty and vectorized spectral solves
+        V = self._update_V_card()
+
+        # 2) Distribute V -> deconv_prop (spots x cells)
+        deconv_prop = self._distribute_V_to_cells(V)
+
+        # 3) Optional refinement: run a few Gauss-Seidel cell-level updates (preserves old pipeline)
+        if refine_with_cell_level:
+            for _ in range(max(1, self.n_iter // 2)):
+                for i in range(self.num_spots):
+                    deconv_prop[i] = self._solve_spot_local_regularized(i, deconv_prop, noise_level=0.01)
+
+        elapsed = time.time() - start
+        deconv_celltypes = self.aggregate_celltypes(deconv_prop)
+        return deconv_celltypes, elapsed
+
+    # -------------------------
+    # Aggregate back to type-level proportions (keeps original interface)
+    # -------------------------
+    def aggregate_celltypes(self, deconv_prop):
+        deconv_celltypes = []
+        unique_celltypes = np.unique(self.cell_types)
+        for i, spot in enumerate(self.st_df.index):
+            weights = deconv_prop[i]
+            tmp = pd.Series(0, index=unique_celltypes, dtype=float)
+            for w, ct in zip(weights, self.cell_types):
+                tmp[ct] += w
+            tmp /= tmp.sum() + 1e-8
+            deconv_celltypes.append(tmp)
+        return pd.DataFrame(deconv_celltypes, index=self.st_df.index)
+
+    # -------------------------
+    # Evaluate
+    # -------------------------
+    def evaluate(self, deconv_celltypes, result_x):
+        metrics = None
+        if result_x is not None:
+            result_prop = result_x.reindex(columns=deconv_celltypes.columns).fillna(0.0).astype(float)
+            result_prop = result_prop.div(result_prop.sum(axis=1) + 1e-8, axis=0)
+            common_cols = deconv_celltypes.columns.intersection(result_prop.columns)
+            flat_gt = result_prop[common_cols].values.flatten()
+            flat_pred = deconv_celltypes[common_cols].values.flatten()
+            metrics = {
+                'mse': mean_squared_error(flat_gt, flat_pred),
+                'mae': mean_absolute_error(flat_gt, flat_pred),
+                'r2': r2_score(flat_gt, flat_pred),
+                'pearson': pearsonr(flat_gt, flat_pred)[0],
+                'spearman': spearmanr(flat_gt, flat_pred)[0],
+                'cosine': np.mean([
+                    cosine_similarity([a], [b])[0, 0]
+                    for a, b in zip(result_prop[common_cols].values, deconv_celltypes[common_cols].values)
+                ])
+            }
+        return metrics
+
+print("Metrics:", metrics)
