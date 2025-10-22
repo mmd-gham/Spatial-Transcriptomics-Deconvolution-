@@ -1,0 +1,83 @@
+from Attention_Regression_Deconv import AttentionRegressionDeconv
+
+
+# Load your data (st_data, st_coordinates, sc_data, celltype, result_x)
+
+def read_file(path):
+    f1 = open(path)
+    result_file = []
+    for line in f1.readlines():
+        line = line.strip('\n')
+        line = line.split()
+        result_file.append(line)
+    f1.close()
+    return result_file
+
+
+st_data = read_file('/content/drive/My Drive/simulation/Scenario 4 Replicate 2/st_data.txt')
+st_data = pd.DataFrame(st_data)
+st_data.columns = st_data.iloc[0]
+st_data = st_data[1:]
+st_data.set_index('name', inplace=True)
+st_data.columns.name = None
+st_data = st_data.transpose()
+st_data = st_data.apply(pd.to_numeric, errors='coerce')
+st_data
+
+
+st_coordinates = read_file('/content/drive/My Drive/simulation/Scenario 4 Replicate 2/st_coordinates.txt')
+st_coordinates = pd.DataFrame(st_coordinates)
+st_coordinates.columns = st_coordinates.iloc[0]
+st_coordinates = st_coordinates[1:]
+st_coordinates.set_index('spot', inplace=True)
+st_coordinates
+
+
+sc_data = read_file('/content/drive/My Drive/simulation/Scenario 4 Replicate 2/sc_data.txt')
+sc_data = pd.DataFrame(sc_data)
+sc_data.columns = sc_data.iloc[0]
+sc_data = sc_data[1:]
+sc_data.set_index('name', inplace=True)
+sc_data.columns.name = None
+sc_data = sc_data.transpose()
+sc_data = sc_data.apply(pd.to_numeric, errors='coerce')
+sc_data
+
+
+celltype = read_file('/content/drive/My Drive/simulation/Scenario 4 Replicate 2/celltype.txt')
+celltype = pd.DataFrame(celltype)
+celltype.columns = celltype.iloc[0]
+celltype = celltype[1:]
+celltype.set_index('name', inplace=True)
+celltype
+
+
+result_x = read_file('/content/drive/My Drive/simulation/Scenario 4 Replicate 2/result_x.txt')
+result_x = pd.DataFrame(result_x)
+result_x.columns = result_x.iloc[0]
+result_x = result_x[1:]
+result_x.set_index('spot', inplace=True)
+result_x = result_x.apply(pd.to_numeric, errors='coerce')
+result_x
+
+
+deconv = AttentionRegressionDeconv(
+    sc_data=sc_data,
+    st_data=st_data,
+    st_coordinates=st_coordinates,
+    celltype=celltype,
+    phi=0.8,
+    lambda_cell=1.0,
+    lambda_spatial=1.0,
+    lambda_ridge=1.0,
+    max_cells_per_type=1000,
+    n_iter=5,
+    n_jobs=-1,
+    k_neighbors=6
+)
+
+deconv_celltypes, elapsed = deconv.run()
+metrics = deconv.evaluate(deconv_celltypes, result_x)
+
+print(f"Elapsed time: {elapsed:.2f} sec")
+print(metrics)
