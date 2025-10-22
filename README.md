@@ -49,10 +49,10 @@ cd Spatial-Transcriptomics-Deconvolution
 🚀 Usage
 
 # Prepare your data: single-cell RNA-seq, spatial transcriptomics, and coordinates
-sc_data = single-cell RNA-seq data
-st_data = spatial transcriptomics data
-st_coordinates = coordinates for spatial spots
-celltype = cell-types of single-cell RNA-seq data
+- sc_data = single-cell RNA-seq data
+- st_data = spatial transcriptomics data
+- st_coordinates = coordinates for spatial spots
+- celltype = cell-types of single-cell RNA-seq data
 
 Once your data is prepared, run the deconvolution model using the following Python code:
 
