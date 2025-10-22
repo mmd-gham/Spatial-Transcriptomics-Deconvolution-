@@ -46,9 +46,9 @@ git clone https://github.com/mmd-gham/Spatial-Transcriptomics-Deconvolution.git
 cd Spatial-Transcriptomics-Deconvolution
 ```
 
-🚀 Usage
+## 🚀 Usage
 
-# Prepare your data: single-cell RNA-seq, spatial transcriptomics, and coordinates
+Prepare your data: single-cell RNA-seq, spatial transcriptomics, and coordinates
 - sc_data = single-cell RNA-seq data
 - st_data = spatial transcriptomics data
 - st_coordinates = coordinates for spatial spots
