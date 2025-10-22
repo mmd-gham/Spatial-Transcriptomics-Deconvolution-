@@ -44,3 +44,56 @@ To run this project, you will need Python and the necessary dependencies. Clone 
 ```bash
 git clone https://github.com/mmd-gham/Spatial-Transcriptomics-Deconvolution.git
 cd Spatial-Transcriptomics-Deconvolution
+```
+
+🚀 Usage
+Data Preparation
+
+You will need to prepare the following data before running the model:
+
+Single-cell RNA-seq data (sc_data): A pandas DataFrame or a NumPy array containing gene expression data for each single cell.
+
+Spatial transcriptomics data (st_data): A pandas DataFrame or a NumPy array containing gene expression data for each spatial spot.
+
+Spatial coordinates (st_coordinates): A pandas DataFrame containing the x and y coordinates for each spatial spot in the transcriptomics data.
+
+Cell-type labels (celltype): A pandas Series or DataFrame containing the cell-type labels corresponding to the single-cell RNA-seq data.
+
+Running the Model
+
+Once your data is prepared, you can run the deconvolution model using the following Python code:
+
+from attention_regression_deconv import AttentionRegressionDeconv
+
+# Prepare your data: single-cell RNA-seq, spatial transcriptomics, and coordinates
+sc_data = # your single-cell RNA-seq data
+st_data = # your spatial transcriptomics data
+st_coordinates = # coordinates for spatial spots
+celltype = # your cell-type information (DataFrame or Series)
+
+# Initialize the model
+deconv = AttentionRegressionDeconv(
+    sc_data=sc_data,
+    st_data=st_data,
+    st_coordinates=st_coordinates,
+    celltype=celltype,
+    phi=0.8,  # Initial spatial autocorrelation
+    lambda_cell=1.0,  # Cell-level regularization
+    lambda_spatial=1.0,  # Spatial smoothing penalty
+    lambda_ridge=1.0,  # Ridge regularization
+    max_cells_per_type=1000,  # Max number of cells per type
+    n_iter=5,  # Number of iterations
+    n_jobs=-1,  # Number of parallel jobs
+    k_neighbors=6  # Number of spatial neighbors
+)
+
+# Run the model to obtain deconvolved cell-type proportions
+deconv_celltypes, elapsed_time = deconv.run()
+
+# Evaluate the performance using ground-truth data if available
+metrics = deconv.evaluate(deconv_celltypes, result_x)
+print(f"Elapsed time: {elapsed_time:.2f} sec")
+print("Evaluation metrics:", metrics)
+
+
+
