@@ -35,5 +35,12 @@ The framework uses a **CARD-inspired** method for type-level deconvolution and i
 
 ---
 
-git clone https://github.com/yourusername/Spatial-Transcriptomics-Deconvolution.git
+## 🛠️ Installation
+
+To run this project, you will need Python and the necessary dependencies. Follow the steps below to install and set up the framework:
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/mmd-gham/Spatial-Transcriptomics-Deconvolution.git
 cd Spatial-Transcriptomics-Deconvolution
