@@ -1,0 +1,130 @@
+import numpy as np
+import pandas as pd
+from Reference_Filtering import AttentionRegressionDeconvV1_3
+
+
+# ======================
+# Helper: ensure finite numeric matrices
+# ======================
+def ensure_finite(df):
+    df = df.astype(float)
+    df = df.replace([np.inf, -np.inf], 0)
+    df = df.fillna(0)
+    return df
+
+
+# ======================
+# End-to-end robustness test with gradual gene dropping
+# ======================
+def test_robustness_pre_filter_gene_drop(
+    sc_data,
+    st_data,
+    st_coordinates,
+    celltype,
+    result_x,
+    drop_levels=[0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9],
+    seed=42
+):
+    """
+    Test model robustness by gradually dropping a fraction of genes
+    from the reference (single-cell) data before filtering.
+    Genes are randomly dropped based on drop_levels.
+    """
+    np.random.seed(seed)
+    results = []
+
+    # Ensure float dtype and finite
+    sc_data = ensure_finite(sc_data)
+    st_data = ensure_finite(st_data)
+
+    sc_data_original = sc_data.copy()
+    all_genes = sc_data_original.columns.tolist()
+
+    for drop_level in drop_levels:
+        # -------------------------
+        # Randomly drop a fraction of genes
+        # -------------------------
+        num_genes_to_drop = int(len(all_genes) * drop_level)
+        dropped_genes = np.random.choice(all_genes, num_genes_to_drop, replace=False)
+        kept_genes = [g for g in all_genes if g not in dropped_genes]
+
+        sc_reduced = sc_data_original[kept_genes].copy()
+
+        # Make sure ST data has the same common genes
+        common_genes = st_data.columns.intersection(sc_reduced.columns)
+        sc_reduced = sc_reduced.loc[:, common_genes]
+        st_reduced = st_data.loc[:, common_genes]
+
+        print(f"\n=== Drop level: {drop_level:.2f} ({num_genes_to_drop} genes dropped, {len(common_genes)} kept) ===")
+
+        # -------------------------
+        # Initialize and run model
+        # -------------------------
+        deconv = AttentionRegressionDeconvV1_3(
+            sc_data=sc_reduced,
+            st_data=st_reduced,
+            st_coordinates=st_coordinates,
+            celltype=celltype,
+            phi=0.8,
+            lambda_cell=1.0,
+            lambda_spatial=1.0,
+            lambda_ridge=1.0,
+            max_cells_per_type=1000,
+            n_iter=5,
+            n_jobs=-1,
+            k_neighbors=6,
+            auto_filter_genes=True,
+            var_threshold=0.1,
+            auto_filter_cells=True,
+            disp_threshold=3.0
+        )
+
+        # -------------------------
+        # Run deconvolution
+        # -------------------------
+        deconv_celltypes, elapsed = deconv.run()
+
+        # -------------------------
+        # Evaluate with built-in metrics
+        # -------------------------
+        metrics = deconv.evaluate(deconv_celltypes, result_x)
+
+        results.append({
+            "drop_level": drop_level,
+            "elapsed_sec": elapsed,
+            **metrics
+        })
+
+        print(f"Elapsed time: {elapsed:.2f} sec")
+        print("Metrics:", metrics)
+
+    # Compile results
+    results_df = pd.DataFrame(results)
+
+    # -------------------------
+    # Safe summary print
+    # -------------------------
+    metric_columns = [m for m in ["Pearson", "MSE", "MAE", "R2"] if m in results_df.columns]
+    print("\n=== Robustness Summary (Gene Drop) ===")
+    if len(metric_columns) > 0:
+        print(results_df[["drop_level"] + metric_columns])
+    else:
+        print(results_df.head())
+
+    return results_df
+
+
+# ======================
+# Example usage
+# ======================
+robustness_results = test_robustness_pre_filter_gene_drop(
+    sc_data=sc_data,
+    st_data=st_data,
+    st_coordinates=st_coordinates,
+    celltype=celltype,
+    result_x=result_x,
+    drop_levels=[0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
+)
+
+
+robustness_results
