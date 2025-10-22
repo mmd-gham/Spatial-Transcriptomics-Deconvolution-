@@ -1,54 +1,20 @@
 # 🧬 Spatial-Transcriptomics-Deconvolution
 
-**Spatial-Transcriptomics-Deconvolution** is a deep-learning-based framework for **cell-type deconvolution** of spatial transcriptomics data.  
-It uses an **attention-regularized regression model** with **spatial Laplacian smoothing** and **ridge penalization** to integrate spatial context, transcriptomic signatures, and attention-weighted similarity between neighboring spots.
+**Spatial-Transcriptomics-Deconvolution** is a deep learning-based framework designed for **cell-type deconvolution** of spatial transcriptomics data. This framework uses an **attention-regularized regression model** with **spatial Laplacian smoothing** and **ridge penalization** to infer the proportions of different cell types across spatial regions in tissue samples. The model integrates **spatial context**, **transcriptomic signatures**, and **attention-weighted similarity** between neighboring spots.
 
 ---
 
 ## 🔍 Model Overview
 
-The goal is to infer the **cell-type proportion matrix** `X`  
-from the **spatial transcriptomics matrix** `Y`  
-and the **reference signature matrix** `S`.
-
-The forward model is:
-
-**Y = X * S + ε**
-
-where `ε` represents Gaussian noise.
+This framework aims to deconvolve spatial transcriptomics data by estimating the **cell-type proportions** in each spatial spot based on single-cell RNA-seq data and spatial transcriptomics measurements. It employs an **attention mechanism** to assign weights to neighboring spots in the spatial matrix based on both their spatial proximity and transcriptomic similarity.
 
 ---
 
-## ⚙️ Optimization Objective
+## ⚙️ Key Features
 
-The **Attention Regression Deconvolution** model estimates `X` by solving:
-
-**min_{X ≥ 0} || Y - X * S ||₂² + λ_r * ||X||₂² + λ_c * Tr(Xᵀ L X)**
-
-Where:
-- `|| Y - X * S ||₂²`: **Reconstruction loss**
-- `λ_r * ||X||₂²`: **Ridge penalty** for regularization
-- `Tr(Xᵀ L X)`: **Spatial smoothing term**, with `L = D - W` being the graph Laplacian of adjacency matrix `W`.
+- **Attention Regularization**: The model integrates spatial and transcriptomic data to create a spatially-aware, attention-weighted regularization for more accurate deconvolution.
+- **Multi-step Deconvolution**: The algorithm first estimates cell-type proportions at the type level using a CARD-inspired approach, then distributes the proportions to the cell level using a Gauss-Seidel update.
+- **Flexible Parameters**: You can adjust parameters such as the number of iterations, the regularization strength, and the number of neighbors used for spatial smoothing.
 
 ---
 
-## 💡 Attention-Weighted Laplacian
-
-Spatial weights are modulated by an attention mechanism:
-
-**W_ij = exp(-α * d_ij²) * Attn(Y_i, Y_j)**
-
-Where:
-- `d_ij`: Spatial distance between spots `i` and `j`.
-- `Attn(Y_i, Y_j)`: Learnable similarity score between transcriptomic profiles of spots `i` and `j`.  
-This adaptively strengthens edges between **biologically similar** and **spatially close** spots.
-
----
-
-## 🧩 Gauss–Seidel Update (Iterative Solver)
-
-At each iteration, the cell-type proportions are updated using an iterative solver to minimize the loss function. This process includes the regularization terms and the spatial constraints.
-
-Optionally, attention weights are re-estimated at each epoch to improve convergence.
-
----
