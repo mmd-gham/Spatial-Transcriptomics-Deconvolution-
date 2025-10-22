@@ -1,0 +1,225 @@
+import numpy as np
+import pandas as pd
+from joblib import Parallel, delayed
+from scipy.spatial.distance import cdist
+import random, time
+from Reference_Filtering import AttentionRegressionDeconvV1_3
+
+# ---------------------------
+# Hyperparameter search space
+# ---------------------------
+phi_values = [0.4, 0.6, 0.8, 1.0]
+lambda_cell_values = [0.01, 0.1, 1.0, 10.0]
+lambda_spatial_values = [0.01, 0.1, 1.0, 10.0]
+lambda_ridge_values = [0.01, 0.1, 1.0, 10.0]
+k_neighbors_values = [4, 6, 8, 10]
+
+alpha_smooth = 0.1
+beta_entropy = 0.1
+n_trials = 60
+
+auto_filter_genes = True
+var_threshold = 0.1
+auto_filter_cells = True
+disp_threshold = 3.0
+
+# ---------------------------
+# Normalize/ensure coords DataFrame
+# ---------------------------
+def _ensure_coords_df(coords):
+    if isinstance(coords, pd.DataFrame):
+        coords_df = coords.copy().apply(pd.to_numeric, errors='coerce')
+        if coords_df.shape[1] >= 2:
+            coords_df = coords_df.iloc[:, :2]
+            coords_df.columns = ['x', 'y']
+        else:
+            coords_df.columns = ['x']
+        return coords_df
+    coords_arr = np.asarray(coords, dtype=float)
+    if coords_arr.ndim == 1:
+        coords_arr = coords_arr.reshape(-1, 1)
+    if coords_arr.shape[1] >= 2:
+        return pd.DataFrame(coords_arr[:, :2], columns=['x', 'y'])
+    return pd.DataFrame(coords_arr, columns=['x'])
+
+coords_global_df = _ensure_coords_df(st_coordinates)
+
+# ---------------------------
+# Gaussian kernel for smoothness
+# ---------------------------
+def compute_W_spot(coords_df, sigma=50.0):
+    coords_arr = coords_df[['x', 'y']].values
+    W = np.exp(-cdist(coords_arr, coords_arr) ** 2 / (2 * sigma ** 2))
+    W /= (W.sum(axis=1, keepdims=True) + 1e-12)
+    return W
+
+# ---------------------------
+# Worker: unsupervised objective
+# ---------------------------
+def unsupervised_objective(phi, lambda_cell, lambda_spatial, lambda_ridge, k_neighbors, trial_idx):
+    start_t = time.time()
+    coords = _ensure_coords_df(coords_global_df)
+    try:
+        # instantiate model
+        deconv = AttentionRegressionDeconvV1_3(
+            sc_data=sc_data,
+            st_data=st_data,
+            st_coordinates=coords,
+            celltype=celltype,
+            phi=phi,
+            lambda_cell=lambda_cell,
+            lambda_spatial=lambda_spatial,
+            lambda_ridge=lambda_ridge,
+            max_cells_per_type=1000,
+            n_iter=5,
+            n_jobs=1,   # prevent over-subscription
+            k_neighbors=k_neighbors,
+            auto_filter_genes=auto_filter_genes,
+            var_threshold=var_threshold,
+            auto_filter_cells=auto_filter_cells,
+            disp_threshold=disp_threshold
+        )
+
+        # compute proportions
+        V = deconv._update_V_card()
+        deconv_prop = deconv._distribute_V_to_cells(V)
+
+        # reconstruction
+        C_cells_by_genes = deconv.C
+        if deconv_prop.shape[1] != C_cells_by_genes.shape[0]:
+            raise ValueError(f"Shape mismatch: deconv_prop cols {deconv_prop.shape[1]} vs C rows {C_cells_by_genes.shape[0]}")
+
+        recon = deconv_prop @ C_cells_by_genes
+        S_obs = deconv.S
+
+        # reconstruction error
+        recon_error = float(np.nanmean((S_obs - recon) ** 2))
+
+        # smoothness
+        W_spot = compute_W_spot(coords, sigma=50.0)
+        diff = deconv_prop[:, None, :] - deconv_prop[None, :, :]
+        smoothness = float(np.nansum(W_spot[:, :, None] * (diff ** 2)) / max(1, deconv_prop.shape[0]))
+
+        # entropy
+        spot_entropy = float(-np.nansum(deconv_prop * np.log(deconv_prop + 1e-12)) / max(1, deconv_prop.shape[0]))
+
+        # unsupervised objective
+        objective_score = recon_error + alpha_smooth * smoothness - beta_entropy * spot_entropy
+
+        elapsed = time.time() - start_t
+        return {
+            "trial_idx": int(trial_idx),
+            "phi": phi,
+            "lambda_cell": lambda_cell,
+            "lambda_spatial": lambda_spatial,
+            "lambda_ridge": lambda_ridge,
+            "k_neighbors": k_neighbors,
+            "objective_score": float(objective_score),
+            "recon_error": float(recon_error),
+            "smoothness": float(smoothness),
+            "entropy": float(spot_entropy),
+            "elapsed_sec": float(elapsed),
+            "error": None
+        }
+
+    except Exception as e:
+        elapsed = time.time() - start_t
+        return {
+            "trial_idx": int(trial_idx),
+            "phi": phi,
+            "lambda_cell": lambda_cell,
+            "lambda_spatial": lambda_spatial,
+            "lambda_ridge": lambda_ridge,
+            "k_neighbors": k_neighbors,
+            "objective_score": np.nan,
+            "recon_error": np.nan,
+            "smoothness": np.nan,
+            "entropy": np.nan,
+            "elapsed_sec": float(elapsed),
+            "error": str(e)
+        }
+
+# ---------------------------
+# Random trials
+# ---------------------------
+random.seed(42)
+param_grid = [
+    (
+        random.choice(phi_values),
+        random.choice(lambda_cell_values),
+        random.choice(lambda_spatial_values),
+        random.choice(lambda_ridge_values),
+        random.choice(k_neighbors_values),
+        i
+    )
+    for i in range(n_trials)
+]
+
+# ---------------------------
+# Run in parallel
+# ---------------------------
+print(f"Running {n_trials} random unsupervised trials in parallel...")
+parallel_results = Parallel(n_jobs=-1, backend="loky", verbose=10)(
+    delayed(unsupervised_objective)(phi, lambda_cell, lambda_spatial, lambda_ridge, k, idx)
+    for (phi, lambda_cell, lambda_spatial, lambda_ridge, k, idx) in param_grid
+)
+
+# ---------------------------
+# Aggregate results in-memory
+# ---------------------------
+results_df_raw = pd.DataFrame(parallel_results)
+valid_df = results_df_raw.replace([np.inf, -np.inf], np.nan).dropna(subset=["objective_score"]).copy()
+
+if valid_df.empty:
+    print("No valid trials returned a numeric objective_score. Check results_df_raw for debugging.")
+else:
+    # Sort and pick best
+    valid_df = valid_df.sort_values("objective_score", ascending=True).reset_index(drop=True)
+    best_row = valid_df.iloc[0]
+    best_params = {
+        "phi": best_row["phi"],
+        "lambda_cell": best_row["lambda_cell"],
+        "lambda_spatial": best_row["lambda_spatial"],
+        "lambda_ridge": best_row["lambda_ridge"],
+        "k_neighbors": int(best_row["k_neighbors"])
+    }
+
+    print("\n===== BEST UNSUPERVISED PARAMETERS =====")
+    print(best_params)
+    print(f"Best objective score: {best_row['objective_score']:.6f}")
+
+    # ---------------------------
+    # Re-evaluate best model vs ground truth (diagnostic)
+    # ---------------------------
+    coords_best = _ensure_coords_df(coords_global_df)
+    best_model = AttentionRegressionDeconvV1_3(
+        sc_data=sc_data,
+        st_data=st_data,
+        st_coordinates=coords_best,
+        celltype=celltype,
+        phi=best_params["phi"],
+        lambda_cell=best_params["lambda_cell"],
+        lambda_spatial=best_params["lambda_spatial"],
+        lambda_ridge=best_params["lambda_ridge"],
+        max_cells_per_type=1000,
+        n_iter=10,
+        n_jobs=1,
+        k_neighbors=best_params["k_neighbors"],
+        auto_filter_genes=auto_filter_genes,
+        var_threshold=var_threshold,
+        auto_filter_cells=auto_filter_cells,
+        disp_threshold=disp_threshold
+    )
+
+    best_pred_types, elapsed_best_run = best_model.run(refine_with_cell_level=True)
+    metrics_best = best_model.evaluate(best_pred_types, result_x)
+
+    print(f"\nElapsed time (best model run): {elapsed_best_run:.2f} sec")
+    print("\n===== GROUND TRUTH EVALUATION OF BEST MODEL =====")
+    print(metrics_best)
+
+# ---------------------------
+# DataFrames in-memory
+# ---------------------------
+# results_df_raw -> all trials (including failed)
+# valid_df      -> successful trials only
