@@ -1,0 +1,100 @@
+from Attention_Regression_Deconv import AttentionRegressionDeconv
+
+
+class AttentionRegressionDeconvV1_3(AttentionRegressionDeconv):
+    def __init__(
+        self, *args,
+        auto_filter_genes=True, var_threshold=0.1,
+        auto_filter_cells=True, disp_threshold=3.0,
+        **kwargs
+    ):
+        """
+        Combined reference filtering:
+        - auto_filter_genes: remove top-variance genes
+        - var_threshold: quantile threshold for noisy genes
+        - auto_filter_cells: remove high-dispersion cells
+        - disp_threshold: z-score threshold for high-dispersion cells
+        """
+        self.auto_filter_genes = auto_filter_genes
+        self.var_threshold = var_threshold
+        self.auto_filter_cells = auto_filter_cells
+        self.disp_threshold = disp_threshold
+        super().__init__(*args, **kwargs)
+
+        if self.auto_filter_genes or self.auto_filter_cells:
+            self._filter_reference()
+
+    # -------------------------
+    # Internal filtering: gene-wise + cell-wise
+    # -------------------------
+    def _filter_reference(self):
+        print("→ Running combined gene + cell filtering...")
+
+        # -------------------------
+        # Gene-wise variance filtering
+        # -------------------------
+        if self.auto_filter_genes:
+            gene_variances = self.sc_df_nolabel.var(axis=0)
+            threshold = gene_variances.quantile(1 - self.var_threshold)
+            keep_genes = gene_variances[gene_variances <= threshold].index.tolist()
+            num_removed_genes = self.sc_df_nolabel.shape[1] - len(keep_genes)
+            print(f"→ Gene-wise filtering: removed {num_removed_genes} high-variance genes")
+            self.sc_df_nolabel = self.sc_df_nolabel.loc[:, keep_genes]
+
+        # -------------------------
+        # Cell-wise dispersion filtering
+        # -------------------------
+        if self.auto_filter_cells:
+            dispersion = self.sc_df_nolabel.var(axis=1) / (self.sc_df_nolabel.mean(axis=1) + 1e-12)
+            z_scores = (dispersion - dispersion.mean()) / (dispersion.std(ddof=0) + 1e-12)
+            keep_cells = np.where(np.abs(z_scores) <= self.disp_threshold)[0]
+            num_removed_cells = self.num_cells - len(keep_cells)
+            print(f"→ Cell-wise filtering: removed {num_removed_cells} high-dispersion cells")
+            self.sc_df_nolabel = self.sc_df_nolabel.iloc[keep_cells, :]
+            self.cell_types = self.cell_types[keep_cells]
+
+        # -------------------------
+        # Update matrices
+        # -------------------------
+        self.C = self.sc_df_nolabel.values.astype(float)
+        self.num_cells = self.C.shape[0]
+
+        # Filter spatial data to match remaining genes
+        common_genes = self.st_df.columns.intersection(self.sc_df_nolabel.columns)
+        self.st_df = self.st_df.loc[:, common_genes]
+        self.S = self.st_df.values.astype(float)
+        self.num_spots, self.num_genes = self.S.shape
+
+        # Rebuild dependent matrices
+        self._build_type_signatures()
+        self.AAT = self.C @ self.C.T
+        self.scaled_L_cell = self._build_attention_laplacian()
+        print("✓ Filtering complete, matrices rebuilt.")
+
+
+# ======================
+# USAGE
+# ======================
+deconv = AttentionRegressionDeconvV1_3(
+    sc_data=sc_data,
+    st_data=st_data,
+    st_coordinates=st_coordinates,
+    celltype=celltype,
+    phi=0.8,
+    lambda_cell=1.0,
+    lambda_spatial=1.0,
+    lambda_ridge=1.0,
+    max_cells_per_type=1000,
+    n_iter=5,
+    n_jobs=-1,
+    k_neighbors=6,
+    auto_filter_genes=True,
+    var_threshold=0.1,
+    auto_filter_cells=True,
+    disp_threshold=3.0
+)
+
+deconv_celltypes, elapsed = deconv.run()
+metrics = deconv.evaluate(deconv_celltypes, result_x)
+print(f"Elapsed time: {elapsed:.2f} sec")
+print("Metrics:", metrics)
